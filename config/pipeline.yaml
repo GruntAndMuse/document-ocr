@@ -1,0 +1,58 @@
+# Default pipeline configuration — generic document OCR.
+# Every route, threshold, and pattern lives here, not in code.
+# For domain-specific tuning, see profiles/ (e.g. profiles/service-manual/).
+#
+# Categories: assign each page one category in your page-list CSV.
+# Routes define which processing steps run for each category.
+
+header:
+  strip_fraction: 0.10         # top strip OCR'd separately for page-number pass
+  page_pattern: '\d+\s*[-–—]\s*\d+'  # page number pattern, e.g. 5-7
+                              # override per-profile for different formats
+  page_fallback: true          # OCR-tolerant fallback for misread separators;
+                              # ambiguous matches are flagged for review,
+                              # never silently guessed
+
+preprocess:
+  deskew: true                # correct page rotation via min-area-rect
+  contrast: clahe              # clahe | none
+  clahe_clip: 2.0              # CLAHE clip limit (higher = more aggressive)
+
+routes:
+  # Standard text page: header strip + body OCR + wordlist corrections
+  text:
+    - split_header
+    - ocr_body
+    - wordlist_correct
+
+  # Rotated content (e.g. landscape schematics in a portrait manual):
+  # body rotates 90° clockwise before OCR, boxes remapped back after
+  rotated:
+    - split_header
+    - rotate_body: 90cw
+    - ocr_body
+    - wordlist_correct
+
+  # Tables and pinouts: cell-level boxes preserved for structure
+  table:
+    - split_header
+    - ocr_body
+    - table_cells
+    - wordlist_correct
+
+  # Diagrams/figures: OCR prose blocks only, skip figure regions
+  diagram:
+    - split_header
+    - ocr_body
+
+  # Blank or near-blank: header/page number only.
+  # Light touch — aggressive enhancement hallucinates bleed-through as content.
+  blank:
+    - split_header
+
+  # Damaged/unreadable: rescan ticket only, never a pipeline input
+  damaged:
+    - log_rescan_ticket
+
+qa:
+  flag_low_conf_below: 0.5     # boxes below this confidence go on review list

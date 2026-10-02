@@ -1,0 +1,35 @@
+# GMT800 domain wordlist
+# Lines: "wrong>right" = observed OCR corruption to fix.
+# Lines starting with "=" = canonical terms that must survive verbatim
+# (checked after OCR; flagged if corrupted, never auto-rewritten into text).
+
+# --- observed corruptions (grow this from pilot red-pen) ---
+Wining>Wiring
+Rrakes>Brakes
+
+# --- canonical wire colors (GM abbreviations) ---
+=BLK
+=BLU
+=BRN
+=GRY
+=GRN
+=ORN
+=PPL
+=PNK
+=RED
+=TAN
+=WHT
+=YEL
+=LT BLU
+=LT GRN
+=DK GRN
+=DK BLU
+
+# --- canonical terms ---
+=CONN ID
+=Splice Pack
+=Ground Distribution
+=Power Distribution
+=Class 2
+=Circuit Description
+=DTC

@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Demo searchable PDF: scan image as background, OCR boxes as invisible
+selectable text on top. Proves highlight/select works on the real output.
+Usage: make_demo_pdf.py <out.pdf> <page1.json> [page2.json ...]
+"""
+import json, os, sys
+import fitz  # pymupdf
+import cv2
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+PAGES = os.path.join(BASE, "samples", "pages")
+JPEG_QUALITY = int(os.environ.get("DEMO_JPEG_Q", "85"))
+
+def fit_font(txt, wid, hgt):
+    """Largest helvetica size that fits inside (wid, hgt): cap-height ~0.72*fs,
+    avg char width ~0.55*fs. Keeps invisible text from spilling into neighbors
+    (overlapping spans break tap/drag selection on mobile viewers)."""
+    if not txt or wid <= 1 or hgt <= 1:
+        return 0.0
+    fs_h = hgt * 0.85
+    fs_w = wid / (0.55 * len(txt))
+    return max(1.0, min(fs_h, fs_w))
+
+def place_box_text(page, b):
+    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = b["box"]
+    # axis-aligned bbox: slanted parallelogram quads can make corner-pair
+    # width go negative, silently dropping the box — use min/max instead
+    xs = [x0, x1, x2, x3]
+    ys = [y0, y1, y2, y3]
+    rx0, rx1 = min(xs), max(xs)
+    ry0, ry1 = min(ys), max(ys)
+    wid, hgt = rx1 - rx0, ry1 - ry0
+    txt = b["text"].strip()
+    if not txt:
+        return
+    try:
+        if hgt > 2.5 * wid:
+            # vertical label: rotate; text length runs along box height
+            fs = fit_font(txt, hgt, wid)
+            if fs <= 0:
+                return
+            page.insert_text((rx0 + wid / 2, ry1), txt, fontsize=fs,
+                             fontname="helv", render_mode=3, rotate=90)
+        else:
+            fs = fit_font(txt, wid, hgt)
+            if fs <= 0:
+                return
+            page.insert_text((rx0, ry1), txt, fontsize=fs,
+                             fontname="helv", render_mode=3)
+    except Exception:
+        pass
+
+def add_page(doc, pj):
+    img_path = os.path.join(PAGES, pj["file"])
+    img = cv2.imread(img_path)
+    h, w = img.shape[:2]
+    # boxes are stored in original full-page coordinates; image goes in as-is
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+    page = doc.new_page(width=w, height=h)
+    page.insert_image(page.rect, stream=buf.tobytes())
+    # invisible selectable text at each OCR box, sized to fit inside the box
+    for b in pj.get("boxes", []):
+        place_box_text(page, b)
+    for b in pj.get("header_boxes", []):
+        place_box_text(page, b)
+    # label
+    page.insert_textbox(fitz.Rect(10, 10, w - 10, 40),
+                        f"{pj['file']}  ·  book page {pj.get('page_number')}",
+                        fontsize=20, fontname="helv", color=(1, 0, 0))
+
+def main():
+    out = sys.argv[1]
+    doc = fitz.open()
+    for jf in sys.argv[2:]:
+        with open(jf) as fh:
+            add_page(doc, json.load(fh))
+    doc.save(out)
+    print(f"wrote {out} ({os.path.getsize(out)//1024}KB, {doc.page_count} pages)")
+
+if __name__ == "__main__":
+    main()

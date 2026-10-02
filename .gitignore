@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Pipeline outputs (generated, not source)
+output/
+*.json
+
+# Test samples — author's copyrighted scans, NEVER commit
+# (TEST-REPORT.md documents the testing without including the scans)
+test-samples/pages/
+test-samples/output/
+test-samples/output2/
+test-samples/*.jpg
+test-samples/*.png
+test-samples/*.pdf
+test-samples/*.csv
+!test-samples/TEST-REPORT.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~

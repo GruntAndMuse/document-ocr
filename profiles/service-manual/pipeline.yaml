@@ -1,0 +1,63 @@
+# Pilot pipeline configuration — parameterized, forkable.
+# Every route, threshold, and pattern lives here, not in code.
+
+header:
+  strip_fraction: 0.10         # top strip used for page-number pass (headers sit
+                              # lower on some chapters; regex stays specific)
+  page_pattern: '\d+\s*[-–—]\s*\d+'  # book page number, e.g. 5-7
+  # OCR-tolerant fallback: dash misread as space/1/l/I, 8 as o/O, etc.
+  # Ambiguous matches go on the review list, never silently guessed.
+  page_fallback: true
+
+preprocess:
+  deskew: true
+  contrast: clahe            # clahe | none
+  clahe_clip: 2.0
+
+routes:
+  schematic:
+    # ROTATED schematics: body text runs bottom-to-top.
+    # Header stays normal; body rotates 90 CW before OCR.
+    - split_header
+    - rotate_body: 90cw
+    - ocr_body
+    - wordlist_correct
+  schematic_text:
+    # Normal-orientation schematic content. No rotation pass.
+    - split_header
+    - ocr_body
+    - wordlist_correct
+  connector_pinout:
+    - split_header
+    - ocr_body
+    - table_cells            # cell-level boxes preserved
+    - wordlist_correct
+  troubleshooting:
+    - split_header
+    - ocr_body
+    - table_cells
+    - wordlist_correct
+  text:
+    - split_header
+    - ocr_body
+    - wordlist_correct
+  diagram:
+    # Figures carry no real text — OCR prose blocks only, skip figure regions.
+    - split_header
+    - ocr_body
+  blank:
+    # Light touch: header/page number only. No aggressive enhancement —
+    # it hallucinates bleed-through as content.
+    - split_header
+  damaged:
+    # NOT pipeline input. Rescan ticket only.
+    - log_rescan_ticket
+
+# Domain wordlist: applied as corrections, never as inventions.
+# Format: "wrong>right" pairs observed in the wild, plus canonical terms
+# that must never be corrupted (checked, not rewritten).
+wordlist: wordlist.txt
+
+qa:
+  flag_low_conf_below: 0.5    # boxes below this go on the review list
+  coverage: true               # coverage map per page

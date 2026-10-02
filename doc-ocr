@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""doc-ocr — one command for the whole document OCR pipeline.
+
+Turns scanned document pages into searchable PDFs: the original scan as
+the visible image, OCR text placed invisibly underneath so you can search,
+highlight, and select exactly where the words are.
+
+Usage:
+    doc-ocr ocr --pages ./scans --sample pages.csv
+    doc-ocr build --pages ./scans final.pdf output/*.json
+    doc-ocr check final.pdf 1 ./scans/page1.jpg
+    doc-ocr sample --manifest manifest.csv --out sample.csv
+
+Subcommands:
+    ocr       Run OCR on page images → per-page JSON
+    build     Build searchable PDF from OCR JSONs
+    check     QC gate: draw text spans over scan (select-all simulation)
+    prescreen Rank pages by placement quality (worst first)
+    sample    Stratified sampler for pilot runs
+
+Run `doc-ocr <subcommand> --help` for subcommand options.
+
+Privacy: everything runs on your machine. No network, no telemetry,
+no cloud. Your documents never leave your computer.
+"""
+import argparse
+import os
+import subprocess
+import sys
+
+# WHY: Scripts live in scripts/ next to this CLI. We resolve relative to
+# this file's location so it works from any working directory.
+BASE = os.path.dirname(os.path.abspath(__file__))
+SCRIPTS = os.path.join(BASE, "scripts")
+CONFIG_DIR = os.path.join(BASE, "config")
+PROFILES_DIR = os.path.join(BASE, "profiles")
+
+# WHY: Use the venv Python if it exists (has pinned deps), else system python3.
+# This avoids "module not found" for users who installed deps in a venv.
+def find_python():
+    for candidate in [
+        os.path.join(BASE, "venv", "bin", "python"),
+        os.path.join(BASE, ".venv", "bin", "python"),
+        sys.executable,
+    ]:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return "python3"
+
+
+def die(msg, hint=None):
+    """Print a friendly error (no traceback) and exit 1."""
+    print(f"error: {msg}", file=sys.stderr)
+    if hint:
+        print(f"hint: {hint}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run_script(name, args):
+    """Run a pipeline script, passing through args. Returns its exit code."""
+    script = os.path.join(SCRIPTS, name)
+    if not os.path.exists(script):
+        die(f"internal script missing: {name}",
+            "reinstall doc-ocr or report this as a bug")
+    py = find_python()
+    # WHY: We don't capture output — the user needs to see progress live.
+    # check=False because we want to propagate the script's exit code.
+    result = subprocess.run([py, script] + args)
+    return result.returncode
+
+
+def resolve_profile(args):
+    """Map --profile NAME to config paths. Returns (config_dir, label)."""
+    # WHY: Profiles let one pipeline serve many document types. The default
+    # config is generic; profiles/service-manual/ has the validated tuning.
+    profile = getattr(args, "profile", None) or "default"
+    if profile == "default":
+        return CONFIG_DIR, "default"
+    profile_dir = os.path.join(PROFILES_DIR, profile)
+    if not os.path.isdir(profile_dir):
+        available = sorted(
+            d for d in os.listdir(PROFILES_DIR)
+            if os.path.isdir(os.path.join(PROFILES_DIR, d))
+        ) if os.path.isdir(PROFILES_DIR) else []
+        die(f"unknown profile: {profile}",
+            f"available profiles: {', '.join(available) or '(none)'}")
+    return profile_dir, profile
+
+
+def cmd_ocr(args):
+    """Run OCR: page images → per-page JSON."""
+    # WHY: pipeline.py reads config from fixed paths relative to itself.
+    # We set env vars so it picks up the selected profile's config.
+    # (Passing --config would be cleaner; this works without modifying it.)
+    config_dir, label = resolve_profile(args)
+    print(f"doc-ocr ocr: using '{label}' profile", file=sys.stderr)
+
+    script_args = []
+    if args.sample:
+        if not os.path.exists(args.sample):
+            die(f"sample CSV not found: {args.sample}",
+                "create one with: doc-ocr sample --manifest <csv> --out <csv>")
+        script_args += ["--sample", args.sample]
+    if args.pages:
+        if not os.path.isdir(args.pages):
+            die(f"pages directory not found: {args.pages}",
+                "point --pages at the folder holding your page scans")
+        script_args += ["--pages", args.pages]
+    if args.out:
+        script_args += ["--out", args.out]
+    if args.report:
+        script_args += ["--report", args.report]
+
+    # WHY: env override lets pipeline.py use profile config without code changes.
+    env = dict(os.environ)
+    env["DOC_OCR_CONFIG"] = config_dir
+    py = find_python()
+    script = os.path.join(SCRIPTS, "pipeline.py")
+    result = subprocess.run([py, script] + script_args, env=env)
+    if result.returncode != 0:
+        die("OCR step failed (see output above)",
+            "check that your page images are readable JPG/PNG files")
+    print("doc-ocr ocr: done", file=sys.stderr)
+
+
+def cmd_build(args):
+    """Build searchable PDF from OCR JSONs."""
+    if not args.output:
+        die("no output PDF specified",
+            "usage: doc-ocr build -o final.pdf output/*.json")
+    jsons = args.jsons
+    if not jsons:
+        die("no OCR JSON files specified",
+            "run 'doc-ocr ocr' first to generate per-page JSON")
+    # WHY: Filter out report/progress JSONs (they lack per-page "boxes").
+    # A per-page JSON always has a "file" key; reports don't.
+    import json as _json
+    page_jsons = []
+    for j in jsons:
+        try:
+            with open(j) as f:
+                d = _json.load(f)
+            if isinstance(d, dict) and "file" in d:
+                page_jsons.append(j)
+        except Exception:
+            pass  # unreadable JSON — let the build script report it
+    if not page_jsons:
+        die("no per-page OCR JSON found in the given files",
+            "run 'doc-ocr ocr' first; pass the per-page JSONs, not the report")
+    skipped_reports = len(jsons) - len(page_jsons)
+    if skipped_reports:
+        print(f"doc-ocr build: skipping {skipped_reports} non-page JSON "
+              f"(report/progress files)", file=sys.stderr)
+    missing = [j for j in page_jsons if not os.path.exists(j)]
+    if missing:
+        die(f"{len(missing)} JSON file(s) not found (first: {missing[0]})",
+            "check the paths — run 'doc-ocr ocr' first if you haven't")
+
+    script_args = ["--pages", args.pages] if args.pages else []
+    if args.label:
+        script_args += ["--label", args.label]
+    if args.dewarp:
+        script_args += ["--dewarp"]
+    script_args += [args.output] + page_jsons
+
+    rc = run_script("build_dewarped_searchable.py", script_args)
+    if rc != 0:
+        die("PDF build failed (see output above)")
+    print(f"doc-ocr build: wrote {args.output}", file=sys.stderr)
+
+
+def cmd_check(args):
+    """QC gate: simulate select-all, draw text spans over the scan."""
+    for path, what in [(args.pdf, "PDF"), (args.image, "page image")]:
+        if not os.path.exists(path):
+            die(f"{what} not found: {path}")
+    rc = run_script("diag_select_all.py",
+                    [args.pdf, str(args.page), args.image, args.out])
+    if rc != 0:
+        die("QC check failed (see output above)")
+    print(f"doc-ocr check: wrote {args.out}", file=sys.stderr)
+    print("open it: blue rectangles must hug the black text.", file=sys.stderr)
+    print("gaps on real text or overhang onto empty space = placement bug.",
+          file=sys.stderr)
+
+
+def cmd_prescreen(args):
+    """Rank pages by placement quality, worst first."""
+    rc = run_script("prescreen.py", args.rest)
+    sys.exit(rc)
+
+
+def cmd_sample(args):
+    """Build a stratified pilot sample from a manifest CSV."""
+    if not args.manifest:
+        die("no manifest specified",
+            "usage: doc-ocr sample --manifest manifest.csv --out sample.csv")
+    if not os.path.exists(args.manifest):
+        die(f"manifest not found: {args.manifest}")
+    script_args = ["--manifest", args.manifest]
+    if args.out:
+        script_args += ["--out", args.out]
+    if args.n:
+        script_args += ["--n", str(args.n)]
+    rc = run_script("sampler.py", script_args)
+    sys.exit(rc)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="doc-ocr",
+        description="Document OCR pipeline: scans → searchable PDFs.",
+        epilog="Privacy: everything runs locally. No network, no telemetry.")
+    sub = ap.add_subparsers(dest="command", metavar="<command>")
+
+    # ocr
+    p = sub.add_parser("ocr", help="Run OCR on page images → per-page JSON")
+    p.add_argument("--pages", help="directory of page scans (JPG/PNG)")
+    p.add_argument("--sample",
+                   help="page-list CSV (columns: filename,category,chapter)")
+    p.add_argument("--out", help="output directory for per-page JSON")
+    p.add_argument("--report", default="ocr_report.json",
+                   help="summary report filename (default: ocr_report.json)")
+    p.add_argument("--profile", default="default",
+                   help="config profile (default: default; try: service-manual)")
+    p.set_defaults(func=cmd_ocr)
+
+    # build
+    p = sub.add_parser("build", help="Build searchable PDF from OCR JSONs")
+    p.add_argument("-o", "--output", required=True, help="output PDF path")
+    p.add_argument("--pages", help="page scans dir (for dewarped images)")
+    p.add_argument("--label", help="header label stamped on each page")
+    p.add_argument("--dewarp", action="store_true",
+                   help="dewarp page curl for readability")
+    p.add_argument("jsons", nargs="*", help="per-page OCR JSON files")
+    p.set_defaults(func=cmd_build)
+
+    # check
+    p = sub.add_parser("check",
+                       help="QC: draw text spans over scan (select-all sim)")
+    p.add_argument("pdf", help="searchable PDF to check")
+    p.add_argument("page", type=int, help="page number (1-based)")
+    p.add_argument("image", help="original page scan image")
+    p.add_argument("out", help="output QC image path")
+    p.set_defaults(func=cmd_check)
+
+    # prescreen
+    p = sub.add_parser("prescreen",
+                       help="Rank pages by placement quality (worst first)")
+    p.add_argument("rest", nargs=argparse.REMAINDER,
+                   help="passed through to prescreen.py")
+    p.set_defaults(func=cmd_prescreen)
+
+    # sample
+    p = sub.add_parser("sample",
+                       help="Build stratified pilot sample from manifest")
+    p.add_argument("--manifest", help="manifest CSV path")
+    p.add_argument("--out", help="output sample CSV path")
+    p.add_argument("--n", type=int, help="sample size")
+    p.set_defaults(func=cmd_sample)
+
+    args = ap.parse_args()
+    if not args.command:
+        ap.print_help()
+        sys.exit(0)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

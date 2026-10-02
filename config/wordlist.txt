@@ -1,0 +1,20 @@
+# Default domain wordlist — generic example.
+# Lines: "wrong>right" = observed OCR corruption to fix.
+# Lines starting with "=" = canonical terms that must survive verbatim
+# (checked after OCR; flagged if corrupted, never auto-rewritten into text).
+#
+# Grow the "wrong>right" section from your own red-pen reviews:
+# every time a human corrects the OCR output, add the corruption here.
+#
+# For domain-specific lists, see profiles/ (e.g. profiles/service-manual/).
+
+# --- observed corruptions (examples — replace with your own) ---
+# Format: what OCR produced > what it should be
+# Example: rn> m  (uncomment and adapt after your first red-pen review)
+
+# --- canonical terms (examples — replace with your own) ---
+# These are checked after OCR. If corrupted, the page is flagged for review.
+# They are NEVER auto-rewritten — a human decides.
+# Example:
+# =Figure
+# =Table

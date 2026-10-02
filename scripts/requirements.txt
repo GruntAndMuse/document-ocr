@@ -1,0 +1,7 @@
+numpy==2.5.3
+onnxruntime==1.30.0
+opencv-python-headless==5.0.0.93
+pillow==12.3.0
+pymupdf==1.28.2
+PyYAML==6.0.3
+rapidocr-onnxruntime==1.4.4
