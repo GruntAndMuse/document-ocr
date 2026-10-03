@@ -24,7 +24,7 @@ jobs:
         run: pip install -r scripts/requirements.txt
 
       - name: Smoke test — CLI help
-        run: python3 doc-ocr --help
+        run: python doc-ocr --help
 
       - name: Smoke test — shared library imports
-        run: python3 -c "import gruntandmuse_shared; print('shared lib OK')"
+        run: python -c "import gruntandmuse_shared; print('shared lib OK')"
