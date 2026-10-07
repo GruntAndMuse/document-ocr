@@ -96,15 +96,22 @@ def main():
     ap.add_argument("--qc", action="store_true",
                     help="run the QC gates after building; a gate failure "
                          "fails this command (exit 1)")
+    ap.add_argument("--json-dir",
+                    help="dir of per-page OCR JSONs (alternative to paths)")
     ap.add_argument("out")
-    ap.add_argument("jsons", nargs="+")
+    ap.add_argument("jsons", nargs="*")
     args = ap.parse_args()
+
+    jsons = mdp.collect_jsons(args.json_dir, args.jsons)
+    if not jsons:
+        raise ValueError("no per-page OCR JSONs found "
+                         "(--json-dir or JSON paths required)")
 
     doc = fitz.open()
     skipped = 0
-    for i, jf in enumerate(args.jsons):
+    for i, jf in enumerate(jsons):
         if (i + 1) % 50 == 0:
-            print(f"  [{i+1}/{len(args.jsons)}]", flush=True)
+            print(f"  [{i+1}/{len(jsons)}]", flush=True)
         with open(jf) as fh:
             pj = json.load(fh)
         if pj.get("error") or pj.get("rescan_ticket"):
@@ -123,7 +130,7 @@ def main():
         qc = os.path.join(BASE, "qc_gates.py")
         rc = subprocess.run(
             [sys.executable, qc, "--pdf", args.out,
-             "--jsons"] + args.jsons).returncode
+             "--jsons"] + jsons).returncode
         if rc != 0:
             print("QC gates FAILED — not shipping this PDF", flush=True)
             sys.exit(1)

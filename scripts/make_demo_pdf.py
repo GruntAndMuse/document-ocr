@@ -80,14 +80,40 @@ def add_page(doc, pj, pages_dir=PAGES):
                         f"{pj['file']}  ·  book page {pj.get('page_number')}",
                         fontsize=20, fontname="helv", color=(1, 0, 0))
 
+def collect_jsons(json_dir=None, jsons=()):
+    """Per-page OCR JSONs in build order. --json-dir sorts by filename;
+    explicit paths keep argv order. Report/progress JSONs (no "file" key)
+    are skipped — same rule as `doc-ocr build`."""
+    if json_dir:
+        import glob
+        paths = sorted(glob.glob(os.path.join(json_dir, "*.json")))
+    else:
+        paths = list(jsons)
+    kept = []
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8") as fh:
+                d = json.load(fh)
+            if isinstance(d, dict) and "file" in d:
+                kept.append(p)
+        except Exception:
+            pass
+    return kept
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pages", default=PAGES, help="page scans dir")
+    ap.add_argument("--json-dir",
+                    help="dir of per-page OCR JSONs (alternative to paths)")
     ap.add_argument("out")
-    ap.add_argument("jsons", nargs="+")
+    ap.add_argument("jsons", nargs="*")
     args = ap.parse_args()
+    jsons = collect_jsons(args.json_dir, args.jsons)
+    if not jsons:
+        ap.error("no per-page OCR JSONs found")
     doc = fitz.open()
-    for jf in args.jsons:
+    for jf in jsons:
         with open(jf) as fh:
             add_page(doc, json.load(fh), args.pages)
     doc.save(args.out)
