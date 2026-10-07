@@ -33,19 +33,30 @@ def place_box_text(page, b):
     txt = b["text"].strip()
     if not txt:
         return
+    # D1 fix (2026-10-05, ported from the GMT800 production run): the
+    # invisible text must be CENTERED on the OCR box, not hung from its
+    # bottom edge. Previously the baseline was placed at ry1 while
+    # fit_font() sized glyphs well below box height, so search highlights
+    # sat ~ (hgt - glyph_h)/2 below the ink — very visible on short
+    # schematic labels. Helvetica cap-height ~= 0.716*fs; centering caps
+    # on the box vertical center puts the highlight on the words.
+    cx, cy = (rx0 + rx1) / 2.0, (ry0 + ry1) / 2.0
     try:
         if hgt > 2.5 * wid:
-            # vertical label: rotate; text length runs along box height
+            # vertical label: rotate; text length runs along box height.
+            # Center the true advance length on the box center.
             fs = fit_font(txt, hgt, wid)
             if fs <= 0:
                 return
-            page.insert_text((rx0 + wid / 2, ry1), txt, fontsize=fs,
-                             fontname="helv", render_mode=3, rotate=90)
+            text_len = fitz.Font("helv").text_length(txt, fontsize=fs)
+            page.insert_text((cx + 0.39 * fs, cy + text_len / 2.0), txt,
+                             fontsize=fs, fontname="helv",
+                             render_mode=3, rotate=90)
         else:
             fs = fit_font(txt, wid, hgt)
             if fs <= 0:
                 return
-            page.insert_text((rx0, ry1), txt, fontsize=fs,
+            page.insert_text((rx0, cy + 0.358 * fs), txt, fontsize=fs,
                              fontname="helv", render_mode=3)
     except Exception:
         pass
