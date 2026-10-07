@@ -12,6 +12,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      PYTHONUTF8: 1  # Windows consoles default to cp1252; the CLI prints Unicode (→)
     steps:
       - uses: actions/checkout@v4
 
