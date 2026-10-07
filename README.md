@@ -17,6 +17,7 @@ page scans (JPG/PNG)
     → doc-ocr ocr        # deskew, enhance, OCR → per-page JSON
     → doc-ocr build      # JSON → searchable PDF (invisible text layer)
     → doc-ocr check      # QC: verify text aligns with the scan
+    → doc-ocr qc         # QC gates: the production audit as build-failing checks
 ```
 
 Every step is config-driven. Page types (text, tables, rotated diagrams)

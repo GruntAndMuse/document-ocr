@@ -19,6 +19,10 @@ import numpy as np
 import fitz
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(BASE))
+from gruntandmuse_shared import friendly_errors  # noqa: E402
+
+BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 from dewarp_test import estimate_curl  # noqa: E402
 import importlib.util
@@ -83,11 +87,15 @@ def add_dewarped_page(doc, pj, pages_dir=PAGES, label="DEWARPED", jpeg_q=85):
     return True
 
 
+@friendly_errors
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pages", default=PAGES)
     ap.add_argument("--label", default="DEWARPED")
     ap.add_argument("--jpeg-q", type=int, default=85)
+    ap.add_argument("--qc", action="store_true",
+                    help="run the QC gates after building; a gate failure "
+                         "fails this command (exit 1)")
     ap.add_argument("out")
     ap.add_argument("jsons", nargs="+")
     args = ap.parse_args()
@@ -107,6 +115,19 @@ def main():
     doc.save(args.out)
     print(f"wrote {args.out} ({os.path.getsize(args.out)//1024}KB, "
           f"{doc.page_count} pages, skipped {skipped})")
+
+    if args.qc:
+        # Post-build hook: the GMT800 production audit as build-failing
+        # gates. Known flaws don't ship — gate failure fails the build.
+        import subprocess
+        qc = os.path.join(BASE, "qc_gates.py")
+        rc = subprocess.run(
+            [sys.executable, qc, "--pdf", args.out,
+             "--jsons"] + args.jsons).returncode
+        if rc != 0:
+            print("QC gates FAILED — not shipping this PDF", flush=True)
+            sys.exit(1)
+        print("QC gates passed", flush=True)
 
 
 if __name__ == "__main__":

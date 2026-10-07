@@ -30,3 +30,23 @@ jobs:
 
       - name: Smoke test — shared library imports
         run: python -c "import gruntandmuse_shared; print('shared lib OK')"
+
+      - name: QC gates test suite
+        run: python tests/test_qc_gates.py
+
+      - name: QC gates — build sample PDFs and run the gates
+        # Builds a small searchable PDF from the checked-in test samples
+        # (original-scan style + dewarped style) and runs the 5 production
+        # QC gates against it. A gate failure fails this job.
+        # The manifest gives the 6-page sample corpus sequence numbers —
+        # book-page gaps in a sample are sampling, not missing pages.
+        run: |
+          python scripts/make_demo_pdf.py --pages test-samples/pages /tmp/qc-orig.pdf test-samples/output/GMT00ST_1_BRAKE_*.jpg.json
+          python scripts/build_dewarped_searchable.py --pages test-samples/pages /tmp/qc-dewarp.pdf test-samples/output/GMT00ST_1_BRAKE_*.jpg.json
+          python -c "
+          import json, glob
+          files = sorted(glob.glob('test-samples/output/GMT00ST_1_BRAKE_*.jpg.json'))
+          pages = [{'file': f, 'page_number': str(i + 1)} for i, f in enumerate(files)]
+          json.dump({'pages': pages}, open('/tmp/qc-manifest.json', 'w'))
+          "
+          python scripts/qc_gates.py --pdf /tmp/qc-dewarp.pdf --originals-pdf /tmp/qc-orig.pdf --json-dir test-samples/output --manifest /tmp/qc-manifest.json --sample 6

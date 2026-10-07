@@ -15,6 +15,7 @@ Subcommands:
     ocr       Run OCR on page images → per-page JSON
     build     Build searchable PDF from OCR JSONs
     check     QC gate: draw text spans over scan (select-all simulation)
+    qc        QC gates: the production audit as build-failing checks
     prescreen Rank pages by placement quality (worst first)
     sample    Stratified sampler for pilot runs
 
@@ -168,6 +169,50 @@ def cmd_build(args):
         die("PDF build failed (see output above)")
     print(f"doc-ocr build: wrote {args.output}", file=sys.stderr)
 
+    # WHY: --qc runs the production QC gates (bbox alignment, integrity,
+    # dewarp parity, encoding, dup/missing) against the fresh PDF. A gate
+    # failure fails the build command — known flaws don't ship.
+    if args.qc:
+        json_dir = os.path.dirname(os.path.abspath(page_jsons[0]))
+        qc_args = ["--pdf", args.output, "--json-dir", json_dir]
+        if args.qc_manifest:
+            qc_args += ["--manifest", args.qc_manifest]
+        if args.qc_originals_pdf:
+            qc_args += ["--originals-pdf", args.qc_originals_pdf]
+        rc = run_script("qc_gates.py", qc_args)
+        if rc != 0:
+            die("QC gates FAILED — the PDF was built but did not pass "
+                "quality gates (see above). Fix the cause, don't ship it.")
+
+
+def cmd_qc(args):
+    """Run the QC gates against a built searchable PDF."""
+    if not os.path.exists(args.pdf):
+        die(f"PDF not found: {args.pdf}")
+    script_args = ["--pdf", args.pdf]
+    if args.json_dir:
+        if not os.path.isdir(args.json_dir):
+            die(f"JSON dir not found: {args.json_dir}",
+                "pass the dir holding the per-page OCR JSONs")
+        script_args += ["--json-dir", args.json_dir]
+    elif args.jsons:
+        script_args += ["--jsons"] + args.jsons
+    else:
+        die("need --json-dir or JSON files",
+            "usage: doc-ocr qc --pdf final.pdf --json-dir output/")
+    if args.manifest:
+        script_args += ["--manifest", args.manifest]
+    if args.originals_pdf:
+        script_args += ["--originals-pdf", args.originals_pdf]
+    if args.sample:
+        script_args += ["--sample", str(args.sample)]
+    if args.report:
+        script_args += ["--report", args.report]
+    rc = run_script("qc_gates.py", script_args)
+    if rc != 0:
+        die("QC gates FAILED (see above)")
+    print("doc-ocr qc: all gates passed", file=sys.stderr)
+
 
 def cmd_check(args):
     """QC gate: simulate select-all, draw text spans over the scan."""
@@ -232,8 +277,31 @@ def main():
     p.add_argument("--label", help="header label stamped on each page")
     p.add_argument("--dewarp", action="store_true",
                    help="dewarp page curl for readability")
+    p.add_argument("--qc", action="store_true",
+                   help="run the QC gates after building; a gate failure "
+                        "fails the build")
+    p.add_argument("--qc-manifest", help="JSON manifest for the QC gates")
+    p.add_argument("--qc-originals-pdf",
+                   help="original-scan PDF for the QC dewarp-parity gate")
     p.add_argument("jsons", nargs="*", help="per-page OCR JSON files")
     p.set_defaults(func=cmd_build)
+
+    # qc
+    p = sub.add_parser("qc",
+                       help="QC gates: build-failing quality checks on a "
+                            "searchable PDF")
+    p.add_argument("--pdf", required=True, help="searchable PDF under test")
+    p.add_argument("--json-dir", help="dir of per-page OCR JSONs")
+    p.add_argument("--jsons", nargs="*",
+                   help="per-page OCR JSONs in PDF page order "
+                        "(alternative to --json-dir)")
+    p.add_argument("--manifest", help="JSON manifest {\"pages\": [...]}")
+    p.add_argument("--originals-pdf",
+                   help="original-scan PDF for the dewarp-parity gate")
+    p.add_argument("--sample", type=int,
+                   help="pages sampled for bbox/encoding gates")
+    p.add_argument("--report", help="write JSON gate report to this path")
+    p.set_defaults(func=cmd_qc)
 
     # check
     p = sub.add_parser("check",

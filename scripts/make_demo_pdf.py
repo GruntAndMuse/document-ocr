@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Demo searchable PDF: scan image as background, OCR boxes as invisible
 selectable text on top. Proves highlight/select works on the real output.
-Usage: make_demo_pdf.py <out.pdf> <page1.json> [page2.json ...]
+Usage: make_demo_pdf.py [--pages DIR] <out.pdf> <page1.json> [page2.json ...]
 """
+import argparse
 import json, os, sys
 import fitz  # pymupdf
 import cv2
@@ -61,8 +62,8 @@ def place_box_text(page, b):
     except Exception:
         pass
 
-def add_page(doc, pj):
-    img_path = os.path.join(PAGES, pj["file"])
+def add_page(doc, pj, pages_dir=PAGES):
+    img_path = os.path.join(pages_dir, pj["file"])
     img = cv2.imread(img_path)
     h, w = img.shape[:2]
     # boxes are stored in original full-page coordinates; image goes in as-is
@@ -80,13 +81,17 @@ def add_page(doc, pj):
                         fontsize=20, fontname="helv", color=(1, 0, 0))
 
 def main():
-    out = sys.argv[1]
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--pages", default=PAGES, help="page scans dir")
+    ap.add_argument("out")
+    ap.add_argument("jsons", nargs="+")
+    args = ap.parse_args()
     doc = fitz.open()
-    for jf in sys.argv[2:]:
+    for jf in args.jsons:
         with open(jf) as fh:
-            add_page(doc, json.load(fh))
-    doc.save(out)
-    print(f"wrote {out} ({os.path.getsize(out)//1024}KB, {doc.page_count} pages)")
+            add_page(doc, json.load(fh), args.pages)
+    doc.save(args.out)
+    print(f"wrote {args.out} ({os.path.getsize(args.out)//1024}KB, {doc.page_count} pages)")
 
 if __name__ == "__main__":
     main()

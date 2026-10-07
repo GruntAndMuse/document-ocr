@@ -120,6 +120,20 @@ onto empty space means the placement is off.
 
 Run this on at least one page of each category before trusting the output.
 
+For a full automated pass, run the QC gates — the production audit
+(bbox alignment, file integrity, dewarped↔original parity, text encoding,
+duplicate/missing pages) as build-failing checks:
+
+```bash
+./doc-ocr qc --pdf manual.pdf --json-dir output/
+```
+
+Or bake it into the build so a gate failure fails the build:
+
+```bash
+./doc-ocr build -o manual.pdf --qc output/*.json
+```
+
 ## Common problems
 
 **"No module named 'cv2'"**
