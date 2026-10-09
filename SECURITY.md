@@ -44,6 +44,16 @@ No obfuscated code, no binary blobs except the OCR model weights
 If you find anything that phones home, open an issue. That's a
 release-blocking bug, not a feature request.
 
+## Reporting a security vulnerability
+
+If you find a security bug, don't open a public issue — use GitHub's
+**private vulnerability reporting** (Security tab → "Report a vulnerability"),
+or email security@gruntandmuse.com.
+Include what you found, how to reproduce it, and what you think the impact is.
+We'll acknowledge within 7 days and keep you posted until it's fixed.
+No bug bounty (we're a two-man pro-bono shop), but you'll get credit in the
+changelog unless you'd rather stay anonymous.
+
 ## Copyright note
 
 This pipeline is MIT licensed. The documents you process with it are
