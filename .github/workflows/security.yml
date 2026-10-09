@@ -1,0 +1,48 @@
+name: Security scans
+
+# WHY this exists: the OpenSSF self-assessment flagged three gaps — no
+# secret scanning, no dependency-vulnerability checks, no static analysis.
+# This workflow closes all three on every push and PR. Free tier: all
+# three tools are free for public repos. Runs on ubuntu only — scanning
+# the source doesn't need the 3-OS build matrix.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:  # manual trigger from the Actions tab
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # WHY: gitleaks scans full history, not just HEAD
+
+      - name: Gitleaks — secret scan
+        # WHY: catches accidentally committed keys/tokens before they sit
+        # in public history. Fails the run on any finding.
+        uses: gitleaks/gitleaks-action@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: pip-audit — vulnerable dependencies
+        # WHY: pinned deps are reproducible, not necessarily safe.
+        # pip-audit checks them against OSV vulnerability data.
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip-audit -r scripts/requirements.txt
+
+      - name: Semgrep — static analysis
+        # WHY: catches common bug/security patterns (injection, unsafe
+        # deserialization, weak crypto) with the community ruleset.
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: auto
