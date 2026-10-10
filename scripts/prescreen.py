@@ -10,24 +10,29 @@ For each page in redpen48.json:
   - boxes_no_span: boxes with effectively no overlapping span
   - body recall per vertical third + header recall, for region diagnosis
 
-The 48pp PDF is half-resolution: JSON box coords are scaled by 0.5.
+JSON box coords are in original image pixels; the searchable PDF may be
+rendered at a different DPI, so the scale factor is derived per page from
+the PDF dimensions vs the JSON image dimensions (no hardcoded assumption).
 Writes redpen/prescreen.json (per-page metrics + worst-first ranking).
 """
 import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(BASE))
+from gruntandmuse_shared import friendly_errors  # noqa: E402
+
 import pymupdf as fitz  # noqa: N812
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-S = 0.5  # 48pp PDF scale factor
+S_FALLBACK = 0.5  # only if the page JSON lacks image dimensions (legacy)
 
 
-def rect_of_box(box):
+def rect_of_box(box, s):
     xs = [p[0] for p in box]
     ys = [p[1] for p in box]
-    return (min(xs) * S, min(ys) * S, max(xs) * S, max(ys) * S)
+    return (min(xs) * s, min(ys) * s, max(xs) * s, max(ys) * s)
 
 
 def area(r):
@@ -46,23 +51,32 @@ def overlap_coef(a, b):
     return inter(a, b) / m if m > 0 else 0.0
 
 
+@friendly_errors
 def main():
-    files = json.load(open(os.path.join(BASE, "redpen", "redpen48.json")))
+    with open(os.path.join(BASE, "redpen", "redpen48.json")) as f:
+        files = json.load(f)
     doc = fitz.open(os.path.join(BASE, "redpen", "redpen-searchable.pdf"))
-    assert len(doc) == len(files), f"pdf pages {len(doc)} != files {len(files)}"
+    if len(doc) != len(files):
+        raise ValueError(f"pdf pages {len(doc)} != files {len(files)}")
 
     pages = []
     for idx, fn in enumerate(files):
-        pj = json.load(open(os.path.join(BASE, "output", fn + ".json")))
+        with open(os.path.join(BASE, "output", fn + ".json")) as f:
+            pj = json.load(f)
+        pg = doc[idx]
+        # WHY derived per page: the old hardcoded S=0.5 was only true for
+        # the 48pp half-resolution PDF. Any other render DPI silently
+        # produced wrong recall/overhang metrics.
+        iw, ih = pj.get("width"), pj.get("height")
+        s = (pg.rect.width / iw) if iw and ih else S_FALLBACK
         allb = []  # (rect, kind, text)
         for b in pj.get("boxes", []):
             if b.get("text", "").strip():
-                allb.append((rect_of_box(b["box"]), "body", b["text"].strip()))
+                allb.append((rect_of_box(b["box"], s), "body", b["text"].strip()))
         for b in pj.get("header_boxes", []):
             if b.get("text", "").strip():
-                allb.append((rect_of_box(b["box"]), "header", b["text"].strip()))
+                allb.append((rect_of_box(b["box"], s), "header", b["text"].strip()))
 
-        pg = doc[idx]
         W, H = pg.rect.width, pg.rect.height
         spans = []
         for blk in pg.get_text("dict")["blocks"]:
@@ -171,20 +185,21 @@ def main():
         )
 
     ranked = sorted(pages, key=lambda p: -p["score"])
-    json.dump(
-        {
-            "pages": pages,
-            "ranked_worst_first": [p["page"] for p in ranked],
-            "metric_notes": {
-                "recall": "fraction of OCR boxes with a placed span overlapping (overlap coef > 0.5)",
-                "overhang": "fraction of spans spilling >50% beyond best box in any direction, or span area >2.5x box (merged/overflow spans)",
-                "score": "(1-recall) + overhang; higher = worse",
-                "body_recall_thirds": "[top, middle, bottom] body-box recall",
+    with open(os.path.join(BASE, "redpen", "prescreen.json"), "w") as f:
+        json.dump(
+            {
+                "pages": pages,
+                "ranked_worst_first": [p["page"] for p in ranked],
+                "metric_notes": {
+                    "recall": "fraction of OCR boxes with a placed span overlapping (overlap coef > 0.5)",
+                    "overhang": "fraction of spans spilling >50% beyond best box in any direction, or span area >2.5x box (merged/overflow spans)",
+                    "score": "(1-recall) + overhang; higher = worse",
+                    "body_recall_thirds": "[top, middle, bottom] body-box recall",
+                },
             },
-        },
-        open(os.path.join(BASE, "redpen", "prescreen.json"), "w"),
-        indent=1,
-    )
+            f,
+            indent=1,
+        )
     print(f"wrote prescreen.json for {len(pages)} pages")
     print("--- worst 8 ---")
     for p in ranked[:8]:

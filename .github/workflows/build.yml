@@ -34,6 +34,11 @@ jobs:
       - name: QC gates test suite
         run: python tests/test_qc_gates.py
 
+      - name: Security regression test suite
+        # 2026-10-10 gauntlet (self-review + DeepSeek + Gemini, 23 findings):
+        # every fix gets a test that fails if the vulnerability comes back.
+        run: python tests/test_security_regressions.py
+
       - name: QC gates — build sample PDFs and run the gates
         # End-to-end gate exercise on synthetic fixtures (tests/make_qc_fixtures.py
         # generates them — the real test scans are gitignored, never committed).

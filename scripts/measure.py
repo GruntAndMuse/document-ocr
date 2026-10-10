@@ -5,10 +5,14 @@ Metrics per his spec: page-number extraction, search/highlight readiness
 rotation correctness (schematic text reads horizontal after rotate).
 Writes: output/accuracy_report.json + prints the scorecard.
 """
-import json, os, glob, re
+import json, os, glob, re, sys
 from collections import defaultdict
 
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+from gruntandmuse_shared import friendly_errors  # noqa: E402
+
+OUT = os.path.join(HERE, "output")
 
 # what "good" looks like per category: expected minimums from the pilot spec
 EXPECT = {
@@ -46,8 +50,10 @@ def score_page(p):
     # 4. rotation: schematic body must have been rotated; others must not
     if exp.get("needs_rotation"):
         c["rotated"] = p.get("body_rotated") == "90cw"
-    # blank pages carry no body content: a clean header pass is a pass
+    # blank pages carry no body content and no page number:
+    # a clean header pass is a pass
     if p.get("category") == "blank":
+        c["page_number"] = True
         c["mostly_confident"] = True
     # damaged pages exist to produce rescan tickets, not page numbers
     if p.get("category") == "damaged":
@@ -63,10 +69,23 @@ def score_page(p):
     s["pass"] = all(v for v in c.values() if isinstance(v, bool))
     return s
 
+def is_page_json(path):
+    """True for per-page OCR output. False for progress.json, custom reports,
+    accuracy_report.json, or anything that isn't a page result — filter by
+    schema, not filename, so new byproducts can't crash the scorer."""
+    try:
+        with open(path) as fh:
+            p = json.load(fh)
+    except Exception:
+        return False
+    return isinstance(p, dict) and "file" in p and "category" in p
+
+
+@friendly_errors
 def main():
-    files = sorted(glob.glob(os.path.join(OUT, "*.json")))
-    files = [f for f in files if not f.endswith("pilot_report.json")
-             and not f.endswith("accuracy_report.json")]
+    os.makedirs(OUT, exist_ok=True)
+    files = sorted(f for f in glob.glob(os.path.join(OUT, "*.json"))
+                   if is_page_json(f))
     scores, by_cat = [], defaultdict(list)
     for f in files:
         with open(f) as fh:
@@ -77,14 +96,26 @@ def main():
     summary = {}
     for cat, ss in sorted(by_cat.items()):
         checks = defaultdict(lambda: [0, 0])
+        ratios = defaultdict(lambda: [0.0, 0])
         for sc in ss:
             for k, v in sc["checks"].items():
-                checks[k][0] += 1 if v else 0
-                checks[k][1] += 1
+                # WHY the isinstance split: high_conf_ratio is a float, and
+                # `1 if 0.75 else 0` counted it as a pass. Booleans get
+                # pass counts; ratios get means. Never mix them.
+                if isinstance(v, bool):
+                    checks[k][0] += 1 if v else 0
+                    checks[k][1] += 1
+                elif isinstance(v, (int, float)):
+                    ratios[k][0] += v
+                    ratios[k][1] += 1
+        check_strs = {k: f"{a}/{b}" for k, (a, b) in sorted(checks.items())}
+        check_strs.update(
+            {k: f"{a / b:.2f} mean" for k, (a, b) in sorted(ratios.items())
+             if b})
         summary[cat] = {
             "n": len(ss),
             "pass_rate": round(sum(1 for sc in ss if sc["pass"]) / len(ss), 2),
-            "checks": {k: f"{a}/{b}" for k, (a, b) in sorted(checks.items())},
+            "checks": check_strs,
         }
     report = {"n_pages": len(scores),
               "overall_pass": round(sum(1 for s in scores if s["pass"])

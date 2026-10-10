@@ -22,8 +22,26 @@ def fit_font(txt, wid, hgt):
     fs_w = wid / (0.55 * len(txt))
     return max(1.0, min(fs_h, fs_w))
 
+def safe_filename(fn):
+    """Reject path traversal in per-page JSON filenames."""
+    if not isinstance(fn, str) or not fn:
+        return None
+    if "/" in fn or "\\" in fn or ".." in fn or "\x00" in fn:
+        return None
+    return fn
+
+
 def place_box_text(page, b):
-    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = b["box"]
+    box = b.get("box")
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return
+    try:
+        (x0, y0), (x1, y1), (x2, y2), (x3, y3) = box
+    except (TypeError, ValueError):
+        return
+    txt = b.get("text")
+    if not isinstance(txt, str):
+        return
     # axis-aligned bbox: slanted parallelogram quads can make corner-pair
     # width go negative, silently dropping the box — use min/max instead
     xs = [x0, x1, x2, x3]
@@ -31,7 +49,7 @@ def place_box_text(page, b):
     rx0, rx1 = min(xs), max(xs)
     ry0, ry1 = min(ys), max(ys)
     wid, hgt = rx1 - rx0, ry1 - ry0
-    txt = b["text"].strip()
+    txt = txt.strip()
     if not txt:
         return
     # D1 fix (2026-10-05, ported from the GMT800 production run): the
@@ -63,18 +81,32 @@ def place_box_text(page, b):
         pass
 
 def add_page(doc, pj, pages_dir=PAGES):
-    img_path = os.path.join(pages_dir, pj["file"])
+    fn = safe_filename(pj.get("file"))
+    if not fn:
+        print(f"  WARN: unsafe filename in JSON, skipping", flush=True)
+        return False
+    img_path = os.path.join(pages_dir, fn)
     img = cv2.imread(img_path)
+    if img is None:
+        print(f"  WARN: unreadable image {img_path}, skipping", flush=True)
+        return False
+    h, w = img.shape[:2]
+    if h * w > 12000 * 12000:
+        print(f"  WARN: image dimensions too large {img_path}, skipping", flush=True)
+        return False
     h, w = img.shape[:2]
     # boxes are stored in original full-page coordinates; image goes in as-is
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
     page = doc.new_page(width=w, height=h)
     page.insert_image(page.rect, stream=buf.tobytes())
     # invisible selectable text at each OCR box, sized to fit inside the box
-    for b in pj.get("boxes", []):
-        place_box_text(page, b)
-    for b in pj.get("header_boxes", []):
-        place_box_text(page, b)
+    for key in ("boxes", "header_boxes"):
+        boxes = pj.get(key, [])
+        if not isinstance(boxes, list):
+            continue
+        for b in boxes:
+            if isinstance(b, dict):
+                place_box_text(page, b)
     # label
     page.insert_textbox(fitz.Rect(10, 10, w - 10, 40),
                         f"{pj['file']}  ·  book page {pj.get('page_number')}",
@@ -94,10 +126,14 @@ def collect_jsons(json_dir=None, jsons=()):
         try:
             with open(p, encoding="utf-8") as fh:
                 d = json.load(fh)
-            if isinstance(d, dict) and "file" in d:
-                kept.append(p)
-        except Exception:
-            pass
+        except json.JSONDecodeError as e:
+            print(f"ERROR: corrupt JSON {p}: {e}", file=sys.stderr)
+            sys.exit(1)
+        except OSError as e:
+            print(f"ERROR: cannot read {p}: {e}", file=sys.stderr)
+            sys.exit(1)
+        if isinstance(d, dict) and "file" in d:
+            kept.append(p)
     return kept
 
 
@@ -116,7 +152,9 @@ def main():
     for jf in jsons:
         with open(jf) as fh:
             add_page(doc, json.load(fh), args.pages)
-    doc.save(args.out)
+    tmp_out = args.out + ".tmp"
+    doc.save(tmp_out)
+    os.replace(tmp_out, args.out)
     print(f"wrote {args.out} ({os.path.getsize(args.out)//1024}KB, {doc.page_count} pages)")
 
 if __name__ == "__main__":

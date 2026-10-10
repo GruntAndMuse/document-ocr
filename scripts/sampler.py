@@ -25,6 +25,10 @@ import random
 import sys
 from collections import defaultdict, Counter
 
+BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(BASE))
+from gruntandmuse_shared import friendly_errors  # noqa: E402
+
 
 def die(msg, hint=None):
     print(f"error: {msg}", file=sys.stderr)
@@ -33,6 +37,7 @@ def die(msg, hint=None):
     sys.exit(1)
 
 
+@friendly_errors
 def main():
     ap = argparse.ArgumentParser(description="Stratified pilot sampler")
     ap.add_argument("--manifest", required=True,

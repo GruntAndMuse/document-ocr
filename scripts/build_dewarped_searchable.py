@@ -44,11 +44,22 @@ def column_displacement(gray):
 
 
 def map_boxes(boxes, col_disp):
+    if not isinstance(boxes, list):
+        return []
     w = len(col_disp)
     out = []
     for b in boxes:
+        if not isinstance(b, dict):
+            continue
+        box = b.get("box")
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
         nb = []
-        for x, y in b["box"]:
+        try:
+            pts = [(float(x), float(y)) for x, y in box]
+        except (TypeError, ValueError):
+            continue
+        for x, y in pts:
             xi = min(max(int(round(x)), 0), w - 1)
             nb.append([float(x), float(y) - float(col_disp[xi])])
         c = dict(b)
@@ -58,10 +69,18 @@ def map_boxes(boxes, col_disp):
 
 
 def add_dewarped_page(doc, pj, pages_dir=PAGES, label="DEWARPED", jpeg_q=85):
-    img_path = os.path.join(pages_dir, pj["file"])
+    fn = mdp.safe_filename(pj.get("file"))
+    if not fn:
+        print(f"  WARN: unsafe filename in JSON, skipping", flush=True)
+        return False
+    img_path = os.path.join(pages_dir, fn)
     img = cv2.imread(img_path)
     if img is None:
         print(f"  WARN: unreadable image {img_path}, skipping", flush=True)
+        return False
+    h, w = img.shape[:2]
+    if h * w > 12000 * 12000:
+        print(f"  WARN: image dimensions too large {img_path}, skipping", flush=True)
         return False
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     col_disp = column_displacement(gray)
@@ -119,7 +138,9 @@ def main():
             continue
         if not add_dewarped_page(doc, pj, args.pages, args.label, args.jpeg_q):
             skipped += 1
-    doc.save(args.out)
+    tmp_out = args.out + ".tmp"
+    doc.save(tmp_out)
+    os.replace(tmp_out, args.out)
     print(f"wrote {args.out} ({os.path.getsize(args.out)//1024}KB, "
           f"{doc.page_count} pages, skipped {skipped})")
 
@@ -128,9 +149,14 @@ def main():
         # gates. Known flaws don't ship — gate failure fails the build.
         import subprocess
         qc = os.path.join(BASE, "qc_gates.py")
-        rc = subprocess.run(
-            [sys.executable, qc, "--pdf", args.out,
-             "--jsons"] + jsons).returncode
+        # Pass --json-dir when available to avoid ARG_MAX on huge manuals;
+        # fall back to the explicit list only for --jsons invocation.
+        qc_args = [sys.executable, qc, "--pdf", args.out]
+        if args.json_dir:
+            qc_args += ["--json-dir", args.json_dir]
+        else:
+            qc_args += ["--jsons"] + jsons
+        rc = subprocess.run(qc_args).returncode
         if rc != 0:
             print("QC gates FAILED — not shipping this PDF", flush=True)
             sys.exit(1)

@@ -98,7 +98,12 @@ def cmd_ocr(args):
 
     script_args = []
     if args.sample:
-        if not os.path.exists(args.sample):
+        # WHY: isfile, not exists — a directory passes exists() and only
+        # blows up later inside pipeline.py with a raw traceback.
+        if not os.path.isfile(args.sample):
+            if os.path.isdir(args.sample):
+                die(f"sample path is a directory, not a CSV file: {args.sample}",
+                    "pass the page-list CSV, e.g. --sample pages.csv")
             die(f"sample CSV not found: {args.sample}",
                 "create one with: doc-ocr sample --manifest <csv> --out <csv>")
         script_args += ["--sample", args.sample]
@@ -116,7 +121,14 @@ def cmd_ocr(args):
     env = dict(os.environ)
     env["DOC_OCR_CONFIG"] = config_dir
     py = find_python()
-    script = os.path.join(SCRIPTS, "pipeline.py")
+    # WHY: --workers > 1 uses the parallel runner. Same logic, same outputs
+    # (verified byte-identical), just faster on multi-core machines.
+    workers = getattr(args, "workers", 1) or 1
+    script = os.path.join(SCRIPTS,
+                          "pipeline_parallel.py" if workers > 1 else "pipeline.py")
+    if workers > 1:
+        script_args += ["--workers", str(workers)]
+        print(f"doc-ocr ocr: parallel mode ({workers} workers)", file=sys.stderr)
     result = subprocess.run([py, script] + script_args, env=env)
     if result.returncode != 0:
         die("OCR step failed (see output above)",
@@ -268,6 +280,8 @@ def main():
                    help="summary report filename (default: ocr_report.json)")
     p.add_argument("--profile", default="default",
                    help="config profile (default: default; try: service-manual)")
+    p.add_argument("--workers", type=int, default=1,
+                   help="parallel workers (default: 1 serial; use cpu_count-1 for speed)")
     p.set_defaults(func=cmd_ocr)
 
     # build

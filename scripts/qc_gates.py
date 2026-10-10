@@ -113,8 +113,13 @@ def page_spans(page):
 def load_page_jsons(json_paths):
     pages = []
     for jp in json_paths:
-        with open(jp, encoding="utf-8") as f:
-            pages.append(json.load(f))
+        try:
+            with open(jp, encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            continue
+        if isinstance(d, dict):
+            pages.append(d)
     return pages
 
 
@@ -122,7 +127,12 @@ def json_boxes(pj):
     """All text boxes (body + header) with non-blank text."""
     out = []
     for key in ("boxes", "header_boxes"):
-        for b in pj.get(key, []) or []:
+        boxes = pj.get(key, [])
+        if not isinstance(boxes, list):
+            continue
+        for b in boxes:
+            if not isinstance(b, dict):
+                continue
             if b.get("text", "").strip() and b.get("box"):
                 out.append(b)
     return out
@@ -130,6 +140,8 @@ def json_boxes(pj):
 
 def sample_indices(n_pages, n_sample):
     """Deterministic evenly-spaced page indices (0-based)."""
+    if n_sample < 1:
+        raise ValueError("--sample must be 1 or more")
     if n_pages <= n_sample:
         return list(range(n_pages))
     step = n_pages / n_sample
@@ -254,6 +266,9 @@ def gate_file_integrity(pdf_path, expected_pages):
     ev["page_count"] = len(doc)
     ev["expected_pages"] = expected_pages
     n_pages = len(doc)
+    if n_pages == 0:
+        doc.close()
+        return result("file_integrity", False, ev, "PDF has no pages")
     if expected_pages is not None and n_pages != expected_pages:
         doc.close()
         return result("file_integrity", False, ev,
@@ -302,9 +317,9 @@ def gate_dewarp_parity(doc, originals_pdf_path, page_jsons, sample_idx):
         jw, jh = pj.get("width"), pj.get("height")
         if not jw or not jh:
             continue
-        for pg in (doc[pi], orig[pi]):
+        for pg, src_doc in ((doc[pi], doc), (orig[pi], orig)):
             for img in pg.get_images(full=True):
-                info = doc.extract_image(img[0])
+                info = src_doc.extract_image(img[0])
                 if (info["width"], info["height"]) != (jw, jh):
                     mismatches.append(
                         {"page": pi + 1, "json_dims": [jw, jh],
@@ -401,7 +416,7 @@ def _page_number_gaps(page_jsons):
     chapter-page forms like '6-659' (grouped per chapter). Returns a list
     of gap descriptions; unparseable numbers are reported, not failed."""
     raw = [pj.get("page_number") for pj in page_jsons]
-    raw = [str(p).strip() for p in raw if p]
+    raw = [str(p).strip() for p in raw if p is not None and str(p).strip() != ""]
     gaps, unparseable = [], []
     # plain integers?
     try:
@@ -497,10 +512,14 @@ def collect_jsons(args):
             try:
                 with open(p, encoding="utf-8") as fh:
                     d = json.load(fh)
-                if isinstance(d, dict) and "file" in d:
-                    kept.append(p)
-            except Exception:
-                pass
+            except json.JSONDecodeError as e:
+                print(f"ERROR: corrupt JSON {p}: {e}", file=sys.stderr)
+                sys.exit(1)
+            except OSError as e:
+                print(f"ERROR: cannot read {p}: {e}", file=sys.stderr)
+                sys.exit(1)
+            if isinstance(d, dict) and "file" in d:
+                kept.append(p)
         paths = kept
     else:
         raise ValueError("need --json-dir or --jsons (per-page OCR JSONs)")

@@ -14,6 +14,10 @@ import numpy as np
 import yaml
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+# WHY: friendly_errors lives in the pipeline root next to the scripts dir.
+# Adding it to sys.path lets every script share one error-handling helper.
+sys.path.insert(0, os.path.dirname(BASE))
+from gruntandmuse_shared import friendly_errors  # noqa: E402
 PAGES = os.path.join(BASE, "samples", "pages")
 OUT = os.path.join(BASE, "output")
 # WHY: DOC_OCR_CONFIG lets the doc-ocr CLI select a profile's config dir
@@ -27,7 +31,14 @@ SAMPLE = os.path.join(BASE, "samples", "pilot_sample.csv")
 
 def load_config(path):
     with open(path) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    # Validate header.strip_fraction at load — a bad value segfaults
+    # OpenCV later instead of raising a clean Python error.
+    sf = cfg.get("header", {}).get("strip_fraction", 0.15)
+    if not isinstance(sf, (int, float)) or not (0 <= sf < 1.0):
+        raise ValueError(
+            f"config header.strip_fraction must be in [0, 1), got {sf!r}")
+    return cfg
 
 def load_wordlist(path):
     fixes, canonical = {}, []
@@ -36,10 +47,10 @@ def load_wordlist(path):
         if not line or line.startswith("#"):
             continue
         if line.startswith("="):
-            canonical.append(line[1:])
+            canonical.append(line[1:].strip())
         elif ">" in line:
             w, r = line.split(">", 1)
-            fixes[w] = r
+            fixes[w.strip()] = r.strip()
     return fixes, canonical
 
 _OCR = None
@@ -57,7 +68,12 @@ def deskew(img):
     if len(coords) < 100:
         return img, 0.0
     angle = cv2.minAreaRect(coords)[-1]
-    angle = angle + 90 if angle < -45 else angle
+    # WHY: minAreaRect returns [-90, 0) in the *opposite* sign convention from
+    # getRotationMatrix2D (CCW-positive). Without negation, deskew rotates the
+    # page the wrong way and DOUBLES the skew (verified 2026-10-10 with
+    # scripts/deskew_synthetic_test.py: 3 deg skew -> -3.00 angle, 6 deg
+    # residual). Negate to get the true corrective rotation.
+    angle = -(90 + angle) if angle < -45 else -angle
     if abs(angle) < 0.3:
         return img, 0.0
     (h, w) = img.shape[:2]
@@ -126,16 +142,42 @@ def extract_page_number(htext, cfg):
     return None, False
 
 def apply_wordlist(text, fixes):
+    # WHY word boundaries: blind substring replace corrupts real words
+    # (e.g. "amp>AMP" turned "camp" into "cAMP"). OCR confusions are
+    # whole-token errors, so replacements match whole tokens only.
     for w, r in fixes.items():
-        text = text.replace(w, r)
+        if w:
+            text = re.sub(r"\b" + re.escape(w) + r"\b", lambda m: r, text)
     return text
 
 def process_page(fn, cat, cfg, fixes, canonical, pages_dir=PAGES):
     t0 = time.time()
-    img = cv2.imread(os.path.join(pages_dir, fn))
+    timings = {}
+    def mark(stage, t_start):
+        timings[stage] = round((time.time() - t_start) * 1000, 1)
+
+    ts = time.time()
+    img_path = os.path.join(pages_dir, fn)
+    # Symlink + size guards: resolve the real path and confirm it's inside
+    # pages_dir (a symlink could point anywhere); refuse absurd file sizes
+    # before cv2.imread allocates memory for a decompression bomb.
+    real = os.path.realpath(img_path)
+    if not real.startswith(os.path.realpath(pages_dir) + os.sep):
+        return {"file": fn, "category": cat, "error": "unsafe path"}
+    if os.path.getsize(real) > 100 * 1024 * 1024:
+        return {"file": fn, "category": cat, "error": "image too large"}
+    img = cv2.imread(real)
+    mark("read_ms", ts)
     if img is None:
         return {"file": fn, "category": cat, "error": "unreadable"}
     h, w = img.shape[:2]
+    if h * w > 12000 * 12000:
+        return {"file": fn, "category": cat, "error": "image dimensions too large"}
+    h, w = img.shape[:2]
+    if cat not in cfg["routes"]:
+        raise ValueError(
+            f"unknown category {cat!r} for page {fn!r} — valid: "
+            f"{', '.join(sorted(cfg['routes']))}")
     route = cfg["routes"].get(cat, [])
     # route keys are nested oddly by the tiny parser; normalize
     steps = []
@@ -147,11 +189,15 @@ def process_page(fn, cat, cfg, fixes, canonical, pages_dir=PAGES):
             steps.append(s if isinstance(s, str) else next(iter(s)))
 
     if cfg["preprocess"].get("deskew"):
+        ts = time.time()
         img, angle = deskew(img)
+        mark("deskew_ms", ts)
     else:
         angle = 0.0
     if cfg["preprocess"].get("contrast") == "clahe":
+        ts = time.time()
         img = normalize(img, cfg["preprocess"].get("clahe_clip", 2.0))
+        mark("normalize_ms", ts)
     h, w = img.shape[:2]
 
     result = {"file": fn, "category": cat, "width": w, "height": h,
@@ -161,7 +207,10 @@ def process_page(fn, cat, cfg, fixes, canonical, pages_dir=PAGES):
     body_img = img[strip:, :]
 
     if "split_header" in steps or "log_rescan_ticket" in steps:
+        ts = time.time()
         hboxes = ocr_image(header_img)
+        mark("header_ocr_ms", ts)
+        ts = time.time()
         for b in hboxes:
             b["text"] = apply_wordlist(b["text"], fixes)
         htext = " ".join(b["text"] for b in hboxes)
@@ -176,6 +225,7 @@ def process_page(fn, cat, cfg, fixes, canonical, pages_dir=PAGES):
         W0, H0 = w, h
         remap_body_boxes(hboxes, W0, H0, 0, rotated=False, deskew_angle=angle)
         result["header_boxes"] = hboxes
+        mark("header_post_ms", ts)
 
     if "log_rescan_ticket" in steps:
         result["rescan_ticket"] = True
@@ -183,11 +233,16 @@ def process_page(fn, cat, cfg, fixes, canonical, pages_dir=PAGES):
         return result
 
     if "rotate_body" in steps:
+        ts = time.time()
         body_img = cv2.rotate(body_img, cv2.ROTATE_90_CLOCKWISE)
+        mark("rotate_ms", ts)
         result["body_rotated"] = "90cw"
 
     if "ocr_body" in steps or "table_cells" in steps:
+        ts = time.time()
         bboxes = ocr_image(body_img)
+        mark("body_ocr_ms", ts)
+        ts = time.time()
         for b in bboxes:
             b["text"] = apply_wordlist(b["text"], fixes)
         # boxes are in processed-body space; remap to full-page coordinates
@@ -206,10 +261,55 @@ def process_page(fn, cat, cfg, fixes, canonical, pages_dir=PAGES):
         found = result["body_text"]
         result["canonical_missing"] = [c for c in canonical
                                        if c not in found and len(c) > 2]
+        mark("body_post_ms", ts)
 
+    result["timings"] = timings
     result["elapsed_s"] = round(time.time() - t0, 1)
     return result
 
+REQUIRED_CSV_COLS = ("filename", "category")
+
+def validate_inputs(args):
+    """Fail fast with a plain-English error before any OCR work starts."""
+    if not os.path.isfile(args.sample):
+        if os.path.isdir(args.sample):
+            raise ValueError(
+                f"sample path is a directory, not a CSV file: {args.sample}")
+        raise ValueError(f"sample CSV not found: {args.sample}")
+    if not os.path.isdir(args.pages):
+        raise ValueError(
+            f"pages directory not found: {args.pages}\n"
+            "       point --pages at the folder holding your page scans")
+
+
+def load_sample_rows(path):
+    with open(path) as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        missing = [c for c in REQUIRED_CSV_COLS
+                   if not reader.fieldnames or c not in reader.fieldnames]
+        if missing:
+            have = ", ".join(reader.fieldnames or ["(empty file)"])
+            raise ValueError(
+                f"sample CSV is missing required column(s): "
+                f"{', '.join(missing)} (has: {have})")
+    # WHY validate here, before any OCR work: a "../" filename would read
+    # outside the pages dir and write outside the output dir (path traversal),
+    # and a duplicate would silently overwrite the first page's JSON.
+    seen = set()
+    for r in rows:
+        fn = r["filename"]
+        if "/" in fn or "\\" in fn or ".." in fn or "\x00" in fn:
+            raise ValueError(
+                f"unsafe filename in CSV: {fn!r} — use plain file names, "
+                f"not paths")
+        if fn in seen:
+            raise ValueError(f"duplicate filename in CSV: {fn!r}")
+        seen.add(fn)
+    return rows
+
+
+@friendly_errors
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sample", default=SAMPLE, help="page-list CSV")
@@ -220,21 +320,44 @@ def main():
     ap.add_argument("--progress-every", type=int, default=50,
                     help="checkpoint progress file every N pages")
     args = ap.parse_args()
+    if args.progress_every < 1:
+        raise ValueError("--progress-every must be 1 or more")
 
     cfg = load_config(CFG)
     fixes, canonical = load_wordlist(WORDLIST)
+    validate_inputs(args)
     os.makedirs(args.out, exist_ok=True)
-    with open(args.sample) as f:
-        rows = list(csv.DictReader(f))
-    # resume: skip pages that already have output JSON
-    todo = [r for r in rows
-            if not os.path.exists(os.path.join(args.out, r["filename"] + ".json"))]
+    rows = load_sample_rows(args.sample)
+    # resume: skip pages that already have a *successful* output JSON.
+    # Pages that errored (or died mid-write leaving a corrupt partial file)
+    # are retried instead of being skipped forever.
+    def needs_work(r):
+        p = os.path.join(args.out, r["filename"] + ".json")
+        if not os.path.exists(p):
+            return True
+        try:
+            with open(p) as f:
+                return "error" in json.load(f)
+        except Exception:
+            return True
+    # clean up stale temp files from crashed runs
+    for f in os.listdir(args.out):
+        if f.endswith(".json.tmp"):
+            os.remove(os.path.join(args.out, f))
+    todo = [r for r in rows if needs_work(r)]
     done_before = len(rows) - len(todo)
     if done_before:
         print(f"resuming: {done_before} already done, {len(todo)} to go", flush=True)
     progress_path = os.path.join(args.out, "progress.json")
     report = {"pages": [], "started": time.strftime("%Y-%m-%d %H:%M %Z"),
               "sample": args.sample}
+    # WHY: a resumed run must report on ALL pages, not just this run's.
+    # Load already-successful pages so the final summary is complete.
+    todo_fns = {r["filename"] for r in todo}
+    for r in rows:
+        if r["filename"] not in todo_fns:
+            with open(os.path.join(args.out, r["filename"] + ".json")) as f:
+                report["pages"].append(json.load(f))
     for i, r in enumerate(todo):
         fn, cat = r["filename"], r["category"]
         n = done_before + i + 1
@@ -244,13 +367,19 @@ def main():
         except Exception as e:
             res = {"file": fn, "category": cat, "error": str(e)[:200]}
         report["pages"].append(res)
-        with open(os.path.join(args.out, fn + ".json"), "w") as f:
+        # WHY tmp + os.replace: a crash mid-write must never leave a partial
+        # .json that resume mistakes for a finished page.
+        out_path = os.path.join(args.out, fn + ".json")
+        tmp_path = out_path + ".tmp"
+        with open(tmp_path, "w") as f:
             json.dump(res, f)
+        os.replace(tmp_path, out_path)
         if n % args.progress_every == 0:
-            with open(progress_path, "w") as f:
+            with open(progress_path + ".tmp", "w") as f:
                 json.dump({"done": n, "total": len(rows),
                            "at": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
                            "last_file": fn}, f)
+            os.replace(progress_path + ".tmp", progress_path)
     # summary
     cats = {}
     for p in report["pages"]:
@@ -265,8 +394,10 @@ def main():
         if p.get("error"):
             c["errors"] += 1
     report["summary"] = cats
-    with open(os.path.join(args.out, args.report), "w") as f:
+    report_path = os.path.join(args.out, args.report)
+    with open(report_path + ".tmp", "w") as f:
         json.dump(report, f, indent=1)
+    os.replace(report_path + ".tmp", report_path)
     print(json.dumps(cats, indent=1))
 
 if __name__ == "__main__":
