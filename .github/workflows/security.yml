@@ -2,9 +2,14 @@ name: Security scans
 
 # WHY this exists: the OpenSSF self-assessment flagged three gaps — no
 # secret scanning, no dependency-vulnerability checks, no static analysis.
-# This workflow closes all three on every push and PR. Free tier: all
-# three tools are free for public repos. Runs on ubuntu only — scanning
-# the source doesn't need the 3-OS build matrix.
+# This workflow closes all three on every push and PR.
+#
+# 2026-10-27 (standards conversion, register row 29): brought up to the
+# house form proven in mesh-to-cad / quality-gate — every action pinned to
+# a full commit SHA (guarded by the pin step below), semgrep runs the
+# explicit p/security-audit + p/secrets rulesets with --error instead of
+# the deprecated returntocorp/semgrep-action `config: auto` form (unpinned,
+# and never guaranteed to fail the run on a finding).
 
 on:
   push:
@@ -12,26 +17,47 @@ on:
   pull_request:
   workflow_dispatch:  # manual trigger from the Actions tab
 
+permissions:
+  contents: read
+
 jobs:
   security:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0  # WHY: gitleaks scans full history, not just HEAD
+          fetch-depth: 0  # gitleaks scans full history, not just HEAD
+
+      - name: Action pins — no mutable tags
+        # Standing guard for the SHA-pinning rule (Semgrep finding
+        # github-actions-mutable-action-tag, 2026-10-19 pentest batch).
+        # Every third-party action referenced in .github/workflows/ must
+        # be pinned to a full 40-char commit SHA, version kept as a
+        # trailing comment. A mutable tag (@v4, @main, ...) fails this
+        # step. To bump an action: resolve the new tag to its commit SHA
+        # and update SHA + comment together.
+        run: |
+          bad=$(grep -rhE '^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*' .github/workflows/ \
+            | grep -vE 'uses:[[:space:]]*(\./|docker://)' \
+            | grep -vE '@[0-9a-f]{40}([[:space:]]|#|$)' || true)
+          if [ -n "$bad" ]; then
+            echo "Unpinned (mutable) action references found:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "All action references are pinned to commit SHAs."
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
 
       - name: Gitleaks — secret scan
         # WHY: catches accidentally committed keys/tokens before they sit
         # in public history. Fails the run on any finding.
-        uses: gitleaks/gitleaks-action@v2
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: pip-audit — vulnerable dependencies
         # WHY: pinned deps are reproducible, not necessarily safe.
@@ -42,7 +68,9 @@ jobs:
 
       - name: Semgrep — static analysis
         # WHY: catches common bug/security patterns (injection, unsafe
-        # deserialization, weak crypto) with the community ruleset.
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: auto
+        # deserialization, weak crypto) with the community security
+        # rulesets. --error fails the run on any finding.
+        run: |
+          pip install semgrep
+          semgrep --config p/security-audit --config p/secrets \
+            --error .
